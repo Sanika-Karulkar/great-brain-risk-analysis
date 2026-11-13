@@ -1,0 +1,388 @@
+```{r}
+install.packages("R.matlab")
+```
+
+
+
+```{r}
+library(R.matlab)
+library(dplyr)
+library(readr)
+ 
+mat_path <- "Rutledge_GBE_risk_data_TOD.mat"
+out_path <- "gbe_trials_full_R.csv.gz"
+ 
+# --- Step 1: read the .mat file -------------------------------------------
+m  <- readMat(mat_path)
+sd <- m$subjData                       # struct array: one element per participant
+
+# --- Step 0 (run these lines by hand once, then leave them commented) ------
+# names(m)                             # should include "subjData" (and "depData")
+# dim(sd)                              # field dimension first, then participants
+# dimnames(sd)[[1]]                    # the 15 field names (id, age, ..., data)
+# str(sd[[which(dimnames(sd)[[1]] == "age")]])   # peek at one value
+# ---------------------------------------------------------------------------
+ 
+fields <- dimnames(sd)[[1]]
+stopifnot(!is.null(fields), "data" %in% fields)
+n <- length(sd) / length(fields)       # number of participants (expect 47067)
+stopifnot(n == 47067)
+ 
+# Flatten to a list-matrix: rows = fields, columns = participants.
+S <- matrix(sd, nrow = length(fields), dimnames = list(fields, NULL))
+ 
+num1 <- function(x) as.numeric(x)[1]   # first value of a scalar field
+```
+```{r}
+# Pull every numeric matrix out of a nested list, however deeply it is wrapped
+get_plays <- function(x) {
+  if (is.matrix(x) && is.numeric(x)) return(list(x))
+  if (is.list(x)) return(unlist(lapply(x, get_plays), recursive = FALSE))
+  list()
+}
+
+# --- Step 2: build one small table per participant -------------------------
+build_participant <- function(i) {
+  plays <- get_plays(S[["data", i]])               # list of 30 x 15 matrices
+  k     <- length(plays)
+  stopifnot(k > 0, all(vapply(plays, nrow, integer(1)) == 30))
+  X <- do.call(rbind, plays)                       # (30 * k) x 15
+
+  # per-play values (timesPlayed, dayNumber, ...) padded/trimmed to k plays
+  pad <- function(v) { v <- as.numeric(unlist(v)); length(v) <- k; v }
+  per_play <- function(field) rep(pad(S[[field, i]]), each = 30)
+
+  dev <- as.character(unlist(S[["deviceType", i]]))
+  dev <- if (length(dev) == 0) NA_character_ else dev[1]
+
+  tibble(
+    participant_id    = num1(S[["id", i]]),
+    play_index        = rep(seq_len(k), each = 30),
+    play_number       = per_play("timesPlayed"),
+    age_group         = num1(S[["age", i]]),
+    is_female         = num1(S[["isFemale", i]]),
+    location          = num1(S[["location", i]]),
+    life_satisfaction = num1(S[["lifeSatisfaction", i]]),
+    education         = num1(S[["education", i]]),
+    native_language   = num1(S[["nativeLanguage", i]]),
+    device_type       = dev,
+    design_version    = per_play("designVersion"),
+    day_number        = per_play("dayNumber"),
+    time_of_day       = per_play("timeOfDay"),
+    trial             = X[, 1],
+    safe_value        = X[, 3],
+    win_value         = X[, 4],
+    lose_value        = X[, 5],
+    chose_risky       = X[, 7],
+    outcome           = X[, 8],
+    choice_rt         = X[, 9],
+    happiness         = X[, 10],
+    happiness_start   = X[, 11],
+    happiness_rt      = X[, 12]
+  )
+}
+
+```
+
+```{r}
+one <- build_participant(1)
+dim(one)                  # rows = 30 * plays, 23 columns at this stage
+head(one)
+system.time(test200 <- bind_rows(lapply(1:200, build_participant)))
+nrow(test200)
+```
+
+```{r}
+trials <- bind_rows(lapply(seq_len(n), build_participant))
+```
+
+
+```{r}
+trials <- trials %>%
+  mutate(
+    trial_type = case_when(safe_value > 0  ~ "gain",
+                           safe_value == 0 ~ "mixed",
+                           safe_value < 0  ~ "loss"),
+    # 1 = gamble landed on the winning side, 0 = losing side, NA = safe choice
+    won_gamble = if_else(chose_risky == 1, as.numeric(outcome == win_value), NA_real_),
+    # result of the PREVIOUS trial; rows are ordered by trial within each play
+    prev_chose = lag(chose_risky),
+    prev_won   = lag(won_gamble),
+    prev_result = case_when(
+      trial == 1                      ~ NA_character_,
+      prev_chose == 0                 ~ "safe",
+      prev_chose == 1 & prev_won == 1 ~ "won",
+      prev_chose == 1 & prev_won == 0 ~ "lost"
+    )
+  ) %>%
+  select(participant_id, play_index, play_number, age_group, is_female, location,
+         life_satisfaction, education, native_language, device_type,
+         design_version, day_number, time_of_day, trial, trial_type,
+         safe_value, win_value, lose_value, chose_risky, outcome, won_gamble,
+         prev_result, choice_rt, happiness, happiness_start, happiness_rt) %>%
+  mutate(across(where(is.numeric), ~ replace(.x, is.nan(.x), NA)))   # NaN -> NA
+```
+
+
+
+```{r}
+stopifnot(nrow(trials) == 2731740,
+          n_distinct(trials$participant_id) == 47067)
+write_csv(trials, out_path, na = "")
+message("Wrote ", nrow(trials), " rows to ", out_path)
+```
+
+```{r}
+# 01_load_and_check.R
+# ---------------------------------------------------------------------------
+# Loads the trial-level table made by python/convert_mat_to_csv.py and checks
+# it against the published results (Rutledge et al., 2016; authors' .m script).
+#
+# STATUS: written without being able to run R, so it is UNTESTED in R. The
+# expected values below were computed from the same table in Python.
+#
+# Setup:  install.packages(c("readr", "dplyr"))
+#         Open the Assignment folder as an RStudio Project.
+# ---------------------------------------------------------------------------
+library(readr)
+library(dplyr)
+
+trials <- read_csv("gbe_trials_full_R.csv.gz", show_col_types = FALSE)   # change the path if the file is elsewhere
+
+# --- 1. Size checks ---------------------------------------------------------
+cat("Rows:", nrow(trials), "(expect 2,731,740)\n")
+cat("Participants:", n_distinct(trials$participant_id), "(expect 47,067)\n")
+cat("Plays:", nrow(distinct(trials, participant_id, play_index)), "(expect 91,058)\n")
+cat("Happiness ratings:", sum(!is.na(trials$happiness)), "(expect 1,092,696)\n")
+stopifnot(nrow(trials) == 2731740, n_distinct(trials$participant_id) == 47067)
+
+# --- 2. Age vs risk taking, FIRST play only (authors' .m script) -------------
+age_cor <- function(type) {
+  d <- trials %>%
+    filter(play_index == 1, trial_type == type) %>%
+    group_by(participant_id) %>%
+    summarise(age = first(age_group), rate = mean(chose_risky), .groups = "drop")
+  round(cor(d$age, d$rate), 3)
+}
+cat("Age vs gain gambling:  r =", age_cor("gain"),  "(expect about -0.11)\n")
+cat("Age vs mixed gambling: r =", age_cor("mixed"), "(expect about  0.02)\n")
+cat("Age vs loss gambling:  r =", age_cor("loss"),  "(expect about  0.00; not significant)\n")
+
+# --- 3. Gamble rate by previous result (used by classroom mode) -------------
+trials %>%
+  filter(prev_result %in% c("won", "lost", "safe")) %>%
+  group_by(prev_result) %>%
+  summarise(n_trials = n(), gamble_rate = round(mean(chose_risky), 4)) %>%
+  print()
+# expect: lost 792,240 / 0.6749; safe 1,039,993 / 0.5010; won 808,449 / 0.6619
+# Note: these pool all trial types. Gain/mixed/loss differ, so always split by trial_type.
+```
+----------------------------------------------------------------------------------------
+
+
+Summary tables
+
+After a loss minus after a win, by trial type: gain +0.0033, loss +0.0113 and mixed +0.0344. The person counts are 45,086, 45,101 and 42,705, and the confidence intervals match.
+Gamble rate by trial type: gain 0.702, loss 0.536 and mixed 0.656, with 47,067 people each.
+```{r}
+# 02_summary_tables.R
+# ---------------------------------------------------------------------------
+# Builds the small summary tables the dashboard loads (instead of the raw
+# 2.7M-row table). Method: compute each participant's own rate first, then
+# average ACROSS PARTICIPANTS, so people who played many times do not count
+# more and the confidence intervals reflect 47,067 people, not 2.7M trials.
+#
+# STATUS: UNTESTED in R. The same logic was run in Python; the expected
+# results are in the comments and in the tables/ folder.
+#
+# Input : gbe_trials_full_R.csv.gz     Output: tables/*.csv
+# age_group 0 means "all ages". low_n = TRUE when fewer than MIN_N people.
+# ---------------------------------------------------------------------------
+library(readr)
+library(dplyr)
+library(tidyr)
+
+trials <- read_csv("gbe_trials_full_R.csv.gz", show_col_types = FALSE)
+dir.create("tables", showWarnings = FALSE)
+MIN_N <- 30
+
+# add an "all ages" copy (age_group = 0) to a participant-level table
+with_all <- function(p) bind_rows(p, mutate(p, age_group = 0))
+
+# mean, sd, se and 95% CI across participants for column `val`
+summarise_people <- function(p, val, ...) {
+  p %>%
+    group_by(...) %>%
+    summarise(n_participants = n(),
+              mean = mean(.data[[val]]),
+              sd   = sd(.data[[val]]),
+              .groups = "drop") %>%
+    mutate(se      = sd / sqrt(n_participants),
+           ci_low  = mean - qt(0.975, pmax(n_participants - 1, 1)) * se,
+           ci_high = mean + qt(0.975, pmax(n_participants - 1, 1)) * se,
+           low_n   = n_participants < MIN_N)
+}
+
+# --- Table 1: gamble rate by previous result --------------------------------
+p1 <- trials %>%
+  filter(prev_result %in% c("won", "lost", "safe")) %>%
+  group_by(participant_id, age_group, trial_type, prev_result) %>%
+  summarise(n_trials = n(), rate = mean(chose_risky), .groups = "drop")
+p1a <- with_all(p1)
+
+by_prev <- summarise_people(p1a, "rate", age_group, trial_type, prev_result) %>%
+  rename(mean_rate = mean, sd_rate = sd, se_rate = se) %>%
+  left_join(p1a %>% group_by(age_group, trial_type, prev_result) %>%
+              summarise(n_trials = sum(n_trials), .groups = "drop"),
+            by = c("age_group", "trial_type", "prev_result"))
+write_csv(by_prev, "tables/summary_by_previous_result.csv")
+
+# --- Table 2: within-person difference, after a loss minus after a win ------
+diffs <- p1 %>%
+  filter(prev_result %in% c("won", "lost")) %>%
+  select(participant_id, age_group, trial_type, prev_result, rate) %>%
+  pivot_wider(names_from = prev_result, values_from = rate) %>%
+  filter(!is.na(won), !is.na(lost)) %>%          # need both cells for this person
+  mutate(diff = lost - won)
+
+lost_minus_won <- summarise_people(with_all(diffs), "diff", age_group, trial_type) %>%
+  rename(mean_diff = mean, sd_diff = sd, se_diff = se)
+write_csv(lost_minus_won, "tables/summary_lost_minus_won.csv")
+
+# --- Table 3: gamble rate by age and trial type (lifespan view) -------------
+p3 <- trials %>%
+  group_by(participant_id, age_group, trial_type) %>%
+  summarise(rate = mean(chose_risky), .groups = "drop")
+
+age_trial <- summarise_people(with_all(p3), "rate", age_group, trial_type) %>%
+  rename(mean_rate = mean, sd_rate = sd, se_rate = se)
+write_csv(age_trial, "tables/summary_age_trial_type.csv")
+
+# --- Checks (all ages; expected values from the Python run) ------------------
+lost_minus_won %>% filter(age_group == 0) %>% print()
+# expect mean_diff: gain 0.0033, loss 0.0113, mixed 0.0344 (n about 45,086 / 45,101 / 42,705)
+age_trial %>% filter(age_group == 0) %>% print()
+# expect mean_rate: gain 0.7016, loss 0.5361, mixed 0.6557 (n = 47,067)
+```
+
+
+-------------------------------------------------------------------------------------------
+
+
+
+The happiness table: mood after winning or getting nothing on gain and loss gambles, with the z-scoring from the authors’ script. This is needed for Daniel’s mood-to-choice view.
+
+A trial-sequence table: one example participant’s choices and mood in order, for Daniel’s timeline view. This one is small.
+
+```{r}
+# 03_happiness_tables.R
+# ---------------------------------------------------------------------------
+# Happiness after outcomes, following the authors' MATLAB script
+# (Rutledge_GBE_risk_data_code.m, section "Do expectations affect happiness").
+# Their method, reproduced here:
+#   * FIRST play of each participant only (data{1} in MATLAB)
+#   * z-score each person's 12 ratings (mean and sd over that play)
+#   * drop the rating made BEFORE trial 1
+#   * give every trial the NEXT rating (so a rating is attached to the
+#     trials leading up to it)
+#   * keep trials where the person gambled; average z within person for:
+#       gain_win  (gain trial, outcome > 0)   gain_zero (gain trial, got 0)
+#       loss_zero (loss trial, got 0)         loss_loss (loss trial, outcome < 0)
+#   * keep people who have all four cells
+# Result: loss_zero is higher than gain_zero although both outcomes are 0,
+# which is the "expectations affect happiness" finding.
+#
+# STATUS: UNTESTED in R. The same logic was run in Python and reproduced the
+# published sample size exactly: n = 35,219.
+# Input: gbe_trials_full_R.csv.gz     Output: tables/*.csv
+# ---------------------------------------------------------------------------
+library(readr)
+library(dplyr)
+library(tidyr)
+
+trials <- read_csv("gbe_trials_full_R.csv.gz", show_col_types = FALSE)
+dir.create("tables", showWarnings = FALSE)
+MIN_N <- 30
+
+with_all <- function(p) bind_rows(p, mutate(p, age_group = 0))
+summarise_people <- function(p, val, ...) {
+  p %>% group_by(...) %>%
+    summarise(n_participants = n(), mean = mean(.data[[val]]), sd = sd(.data[[val]]), .groups = "drop") %>%
+    mutate(se = sd / sqrt(n_participants),
+           ci_low  = mean - qt(0.975, pmax(n_participants - 1, 1)) * se,
+           ci_high = mean + qt(0.975, pmax(n_participants - 1, 1)) * se,
+           low_n = n_participants < MIN_N)
+}
+
+# --- 1. z-score within person and attach the NEXT rating to each trial ------
+first_play <- trials %>%
+  filter(play_index == 1) %>%
+  arrange(participant_id, trial) %>%
+  group_by(participant_id) %>%
+  mutate(rating_rank = cumsum(!is.na(happiness)),
+         z = (happiness - mean(happiness, na.rm = TRUE)) / sd(happiness, na.rm = TRUE),
+         z = if_else(is.finite(z), z, NA_real_),             # constant ratings -> NA
+         z_after = if_else(!is.na(happiness) & rating_rank > 1, z, NA_real_)) %>%
+  fill(z_after, .direction = "up") %>%                       # take the next rating
+  ungroup() %>%
+  rename(happiness_z = z, happiness_z_filled = z_after)
+
+# --- 2. mean z per person and outcome category ------------------------------
+per_person <- first_play %>%
+  filter(chose_risky == 1) %>%
+  mutate(outcome_category = case_when(
+    trial_type == "gain" & outcome > 0  ~ "gain_win",
+    trial_type == "gain" & outcome == 0 ~ "gain_zero",
+    trial_type == "loss" & outcome == 0 ~ "loss_zero",
+    trial_type == "loss" & outcome < 0  ~ "loss_loss")) %>%
+  filter(!is.na(outcome_category)) %>%
+  group_by(participant_id, age_group, outcome_category) %>%
+  summarise(z = mean(happiness_z_filled, na.rm = TRUE), .groups = "drop") %>%
+  mutate(z = if_else(is.finite(z), z, NA_real_)) %>%
+  pivot_wider(names_from = outcome_category, values_from = z) %>%
+  drop_na(gain_win, gain_zero, loss_zero, loss_loss)          # people with all four cells
+
+cat("Participants with all four cells:", nrow(per_person), "(expect 35,219)\n")
+stopifnot(nrow(per_person) == 35219)
+
+# --- Table 4: mean happiness (z) after each outcome -------------------------
+outcomes_long <- per_person %>%
+  pivot_longer(c(gain_win, gain_zero, loss_zero, loss_loss),
+               names_to = "outcome_category", values_to = "z")
+happy_out <- summarise_people(with_all(outcomes_long), "z", age_group, outcome_category) %>%
+  rename(mean_z = mean, sd_z = sd, se_z = se)
+write_csv(happy_out, "tables/summary_happiness_outcomes.csv")
+happy_out %>% filter(age_group == 0) %>% print()
+# expect mean_z: gain_win 0.342, gain_zero -0.157, loss_zero 0.120, loss_loss -0.386
+
+# --- Table 5: the key comparison, loss_zero minus gain_zero ------------------
+zero_diff <- per_person %>% mutate(diff = loss_zero - gain_zero)
+happy_diff <- summarise_people(with_all(zero_diff), "diff", age_group) %>%
+  rename(mean_diff = mean, sd_diff = sd, se_diff = se)
+write_csv(happy_diff, "tables/summary_happiness_zero_diff.csv")
+happy_diff %>% print()
+# expect all ages: mean_diff 0.276, CI 0.268 to 0.285, n = 35,219
+
+# --- Table 6: example choice/mood sequences for the timeline view ------------
+# Deterministic subset (participant_id divisible by 250) so R and Python agree.
+example_seq <- first_play %>%
+  filter(participant_id %% 250 == 0) %>%
+  select(participant_id, age_group, trial, trial_type, chose_risky, outcome,
+         won_gamble, prev_result, happiness, happiness_z, happiness_z_filled)
+write_csv(example_seq, "tables/example_sequences.csv")
+cat("Example sequences:", n_distinct(example_seq$participant_id), "participants (expect 188)\n")
+```
+Getting nothing on a loss gamble means you avoided a loss. People report higher mood after getting zero in a loss gamble than after getting zero in a gain gamble, although the outcome is identical. The within-person gap is 0.28 (95% CI 0.27 to 0.29). It is the “expectations affect happiness” result from the original studies, and it holds in every age group.
+
+New files
+
+summary_happiness_outcomes.csv: mean mood by age group and outcome, with n and confidence intervals.
+summary_happiness_zero_diff.csv: the within-person gap above, by age group.
+example_sequences.csv: the first play of 188 participants, trial by trial, with their choices, outcomes, and mood (raw and z-scored). This is for Daniel’s timeline. I picked participants whose ID is divisible by 250, so the R and Python subsets are the same.
+03_happiness_tables.R: the R script that makes all three.
+
+
+
+
+
+

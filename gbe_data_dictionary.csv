@@ -1,0 +1,27 @@
+column,type,description,source
+participant_id,integer,Sequential participant number (1-47067),id
+play_index,integer,Position of this play among the participant's plays that have data (1 = first),derived
+play_number,integer,Number of plays started up to and including this play (can exceed play_index if plays were not completed or uploaded),timesPlayed
+age_group,integer,1=18-24; 2=25-29; 3=30-39; 4=40-49; 5=50-59; 6=60-69; 7=70+ (group 7 has only about 500 people),age
+is_female,integer,1=female; 0=male; NA if missing,isFemale
+location,integer,Location code from the README location table (0-7 UK; 100-309 other Europe; 400 USA; 401-509 other Americas; 600-909 Africa/Asia/Pacific; 999 unknown),location
+life_satisfaction,integer,Value in the .mat file that the README does not document; meaning not verified. Do not use without checking with the course team,lifeSatisfaction
+education,integer,0=GCSE or similar; 1=A-levels or similar; 2=university degree; 3=advanced degree,education
+native_language,integer,0=Arabic; 1=English; 2=French; 3=German; 4=Hindi; 5=Mandarin; 6=Portuguese; 7=Punjabi; 8=Spanish; 9=Other; NA if missing,nativeLanguage
+device_type,text,android / iphone / ipad / ipod / unknown (lower case),deviceType
+design_version,integer,App task design version 1-5 (1-2 = 'ratio' design; 3-5 = 'uncorrelated' design),designVersion
+day_number,integer,Days since the participant first played the task,dayNumber
+time_of_day,number,Time the play was completed as a fraction of a day in GMT (0-1). Multiply by 24 for the hour. Not local time,timeOfDay
+trial,integer,Trial number within the play (1-30),data col 1
+trial_type,text,gain if safe_value>0; mixed if safe_value=0; loss if safe_value<0,derived from data col 3
+safe_value,number,Value of the safe option,data col 3
+win_value,number,Value on the winning side of the spinner,data col 4
+lose_value,number,Value on the losing side of the spinner,data col 5
+chose_risky,integer,1=gambled; 0=chose the safe option,data col 7
+outcome,number,Trial outcome. If the player gambled and this equals win_value they won,data col 8
+won_gamble,integer,1=gamble landed on winning side; 0=landed on losing side; NA if the safe option was chosen,derived (outcome==win_value if chose_risky==1)
+prev_result,text,Result of the PREVIOUS trial: won / lost (previous trial was a gamble) or safe (previous trial was the safe choice); empty on trial 1. 'lost' means the spinner landed on the worse side: nothing in a gain trial; the negative amount in a loss or mixed trial; 'won' in a loss trial means getting 0,derived
+choice_rt,number,Choice latency in seconds,data col 9
+happiness,number,Happiness rating (0-100) made after this trial; NA when no rating was asked. The rating for trial 1 was made BEFORE the first trial. Not z-scored,data col 10
+happiness_start,number,Starting position of the rating cursor; NA when no rating asked,data col 11
+happiness_rt,number,Seconds taken to answer the happiness question; NA when no rating asked,data col 12
